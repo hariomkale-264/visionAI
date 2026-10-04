@@ -1,0 +1,10 @@
+{
+  "name": "VisionGuide AI — Visual & Mobility Assistant PWA",
+  "description": "AI-powered voice-first visual assistance, real-time obstacle detection, walking navigation, and environmental awareness Progressive Web App for blind and visually impaired users.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
