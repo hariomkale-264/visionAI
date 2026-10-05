@@ -19,6 +19,7 @@ interface NavigationDisplayProps {
   isNavigating: boolean;
   searchCandidates: SearchResultPlace[] | null;
   pendingDestination: SearchResultPlace | null;
+  pendingDestinationText?: string | null;
   onConfirmDestination: (accepted: boolean) => void;
   onSelectCandidate: (index: number) => void;
   onRepeatInstruction: () => void;
@@ -32,6 +33,7 @@ export const NavigationDisplay: React.FC<NavigationDisplayProps> = ({
   isNavigating,
   searchCandidates,
   pendingDestination,
+  pendingDestinationText,
   onConfirmDestination,
   onSelectCandidate,
   onRepeatInstruction,
@@ -39,7 +41,6 @@ export const NavigationDisplay: React.FC<NavigationDisplayProps> = ({
   onRecalculate,
   onOpenPhoneMap,
 }) => {
-  // Maneuver Icon Helper
   const getManeuverIcon = (modifier?: string, type?: string) => {
     if (type === 'arrive') return <MapPin className="h-6 w-6 text-emerald-600" />;
     const m = (modifier || '').toLowerCase();
@@ -48,29 +49,32 @@ export const NavigationDisplay: React.FC<NavigationDisplayProps> = ({
     return <ArrowUp className="h-6 w-6 text-neutral-900" />;
   };
 
-  // 1. Destination Confirmation Dialog
-  if (pendingDestination) {
+  // 1. Destination Confirmation Dialog (Voice or Search)
+  if (pendingDestination || pendingDestinationText) {
+    const destTitle = pendingDestination?.name || pendingDestinationText || 'Destination';
+    const destDetails = pendingDestination?.displayName || 'Walking route via Google Maps';
+
     return (
       <div
         role="region"
         aria-label="Destination Confirmation"
-        className="rounded-2xl border-2 border-neutral-900 bg-white p-4 shadow-sm"
+        className="rounded-2xl border-2 border-blue-600 bg-white p-4 shadow-lg ring-2 ring-blue-200"
       >
-        <div className="flex items-center gap-2 mb-2 text-neutral-900 font-bold">
+        <div className="flex items-center gap-2 mb-2 text-blue-700 font-bold">
           <HelpCircle className="h-5 w-5 text-blue-600" />
-          <h2 className="text-sm uppercase tracking-wider">Confirm Destination</h2>
+          <h2 className="text-sm uppercase tracking-wider">Confirm Google Maps Walking Navigation</h2>
         </div>
 
-        <p className="text-base font-bold text-neutral-900 mb-1">
-          {pendingDestination.name}
+        <p className="text-lg font-black text-neutral-900 mb-1">
+          {destTitle}
         </p>
-        <p className="text-xs text-neutral-600 mb-4 truncate">
-          {pendingDestination.displayName}
+        <p className="text-xs text-neutral-600 mb-4 line-clamp-2">
+          {destDetails}
         </p>
 
-        {pendingDestination.distanceMeters && (
-          <div className="mb-4 inline-flex items-center gap-1.5 rounded-lg bg-neutral-100 px-3 py-1 text-xs font-semibold text-neutral-800">
-            <Footprints className="h-4 w-4" />
+        {pendingDestination?.distanceMeters && (
+          <div className="mb-4 inline-flex items-center gap-1.5 rounded-lg bg-blue-50 border border-blue-200 px-3 py-1 text-xs font-bold text-blue-900">
+            <Footprints className="h-4 w-4 text-blue-700" />
             <span>Approximately {pendingDestination.distanceMeters} meters away</span>
           </div>
         )}
@@ -78,16 +82,16 @@ export const NavigationDisplay: React.FC<NavigationDisplayProps> = ({
         <div className="grid grid-cols-2 gap-2 pt-1">
           <button
             onClick={() => onConfirmDestination(true)}
-            aria-label="Yes, start walking directions"
-            className="flex items-center justify-center gap-2 rounded-xl bg-neutral-900 py-3 text-sm font-bold text-white shadow-sm hover:bg-neutral-800 transition active:scale-95 focus:ring-2 focus:ring-neutral-900 focus:outline-none"
+            aria-label={`Confirm walking directions to ${destTitle}`}
+            className="flex items-center justify-center gap-2 rounded-xl bg-blue-600 py-3 text-sm font-bold text-white shadow-md hover:bg-blue-700 transition active:scale-95 focus:ring-2 focus:ring-blue-700 focus:outline-none"
           >
             <CheckCircle className="h-4 w-4" />
-            <span>Yes, Start Walk</span>
+            <span>Start (Google Maps)</span>
           </button>
 
           <button
             onClick={() => onConfirmDestination(false)}
-            aria-label="Cancel destination"
+            aria-label="Cancel navigation"
             className="flex items-center justify-center gap-2 rounded-xl border border-neutral-300 bg-white py-3 text-sm font-bold text-neutral-800 hover:bg-neutral-100 transition active:scale-95 focus:ring-2 focus:ring-neutral-900 focus:outline-none"
           >
             <XCircle className="h-4 w-4 text-neutral-500" />
@@ -211,11 +215,11 @@ export const NavigationDisplay: React.FC<NavigationDisplayProps> = ({
 
         <button
           onClick={onOpenPhoneMap}
-          aria-label="Open route in phone native map application"
-          className="flex items-center justify-center gap-1.5 rounded-xl border border-neutral-300 bg-white py-2 text-xs font-bold text-neutral-800 hover:bg-neutral-100 transition active:scale-95 focus:ring-2 focus:ring-neutral-900 focus:outline-none"
+          aria-label="Open Google Maps navigation"
+          className="flex items-center justify-center gap-1.5 rounded-xl border border-blue-400 bg-blue-50 py-2 text-xs font-bold text-blue-900 hover:bg-blue-100 transition active:scale-95 focus:ring-2 focus:ring-blue-600 focus:outline-none"
         >
           <ExternalLink className="h-3.5 w-3.5 text-blue-600" />
-          <span>Phone Maps</span>
+          <span>Google Maps</span>
         </button>
 
         <button

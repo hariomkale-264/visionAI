@@ -280,7 +280,7 @@ app.post('/api/vision/analyze', async (req, res) => {
 ${langInstruction}
 Analyze the image. Read any visible text accurately: signs, room numbers, labels, packaging, documents, notices, menus, bus numbers.
 Extract the text verbatim. Provide a clear, natural spoken readout of what the text says.
-If text is blurry or cut off, clearly state: "I can't read the text clearly. Please move the camera closer or steady the phone."
+If text is blurry or cut off, clearly state: "I couldn't read the text clearly. Please move the camera closer or steady the phone."
 Output JSON with:
 {
   "extractedText": "full recognized text",
@@ -302,50 +302,41 @@ Output JSON with:
   "spokenAlert": "concise spoken description for Bluetooth earbuds",
   "detectedHazards": ["hazard1", "hazard2"]
 }`;
-    } else if (mode === 'ask_ai') {
-      prompt = `You are an AI assistant answering a visually impaired person's specific question about what the camera sees.
-${langInstruction}
-User question: "${userQuestion || 'What is this?'}".
-Answer directly, concisely, and honestly.
-If confidence is low, use cautious language like "I am not certain, but it appears to be...".
-Never present uncertain predictions as guaranteed facts.
-Output JSON with:
-{
-  "answer": "concise answer to user's question",
-  "spokenAlert": "clear spoken answer for Bluetooth earbuds",
-  "confidence": "high" | "medium" | "low"
-}`;
     } else {
-      // assist or navigation mode
-      prompt = `You are an AI mobility assistant for a blind pedestrian walking with a smartphone chest/hand-held camera.
+      // assist or navigation mode: Object detection with 2D bounding boxes
+      prompt = `You are an AI mobility assistant for a blind pedestrian walking with a smartphone or laptop camera.
 ${langInstruction}
-Analyze this camera frame for physical obstacles and environmental hazards.
+Analyze this camera frame for physical obstacles, objects, and environmental hazards.
 Walking context: ${walkingContext || 'walking on path/sidewalk'}.
 
 Identify key objects in the path or immediate vicinity:
-- People, vehicles (cars, buses, trucks, motorcycles, bicycles), animals
-- Obstacles: walls, closed doors, poles, trees, chairs, tables, bags
-- Ground hazards: stairs, steps, curbs, potholes, drop-offs, barriers
-- Road elements: road crossings, zebra crossings, traffic lights
+- People
+- Vehicles: cars, buses, trucks, motorcycles, bicycles
+- Traffic lights, road signs
+- Dogs and other animals
+- Common indoor/outdoor objects: chairs, tables, doors, poles, trees, barriers
+- Ground hazards: stairs, steps, curbs, potholes, drop-offs
 
-For each significant object, evaluate:
-- name: object name (e.g. "Vehicle", "Person", "Pole", "Curbs", "Stairs", "Pothole", "Bicycle")
+For each significant object detected with confidence >= 0.45:
+- name: object name (e.g. "Person", "Car", "Bicycle", "Chair", "Traffic Light", "Dog", "Stairs", "Curbs", "Pothole", "Door", "Pole")
+- box_2d: 2D bounding box as [ymin, xmin, ymax, xmax] with integer coordinates normalized from 0 to 1000 (0 is top/left, 1000 is bottom/right). Ensure the box tightly wraps the object!
+- confidence: float between 0.50 and 1.0
 - distance: approximate string ("very close", "about 1 meter", "about 2 meters", "several meters away", "far ahead")
-- distanceMeters: estimated number in meters (0.5 to 10)
+- distanceMeters: estimated float in meters (0.5 to 10.0)
 - direction: "far left" | "left" | "center" | "right" | "far right"
 - movement: "stationary" | "approaching" | "moving away" | "crossing path"
-- inWalkingPath: boolean (true if obstructing the forward center walking path)
+- inWalkingPath: boolean (true if obstructing the forward center walking corridor)
 - priorityLevel:
     1 (CRITICAL: immediate danger, approaching vehicle, drop-off/pothole/down stairs within 1.5m, obstacle <1m directly in walking path)
     2 (HIGH: obstacle ahead ~1-2 meters in path)
     3 (MEDIUM: person or object nearby 2-3 meters)
     4 (LOW: peripheral or stationary distant objects)
-- spokenAlert: clear, punchy warning (e.g., "Warning: Vehicle approaching from your right", "Obstacle ahead, approximately 1 meter", "Person on your left, about 2 meters", "Curbs ahead, about 1 meter")
+- spokenAlert: clear, punchy warning (e.g., "Person ahead.", "Car approaching from your right.", "Traffic light detected.", "Obstacle directly ahead.", "Dog on your left.")
 
 SAFETY RULES:
 - NEVER tell the user "The road is safe" or "Cross now" or "No vehicles are coming".
 - If a road crossing is visible, include trafficAlert: "Road crossing detected. Please verify traffic before crossing."
-- Limit objects to the 1 to 4 most relevant to avoid audio clutter.
+- Limit objects to the 1 to 5 most relevant to avoid audio clutter.
 - Provide primaryAlert: the single most urgent alert to speak right now, or empty string if clear.
 
 Output valid JSON matching this schema:
@@ -355,12 +346,14 @@ Output valid JSON matching this schema:
   "objects": [
     {
       "name": "string",
-      "distance": "string",
-      "distanceMeters": 1.0,
-      "direction": "left" | "center" | "right" | "far left" | "far right",
-      "movement": "stationary" | "approaching" | "moving away" | "crossing path",
+      "box_2d": [100, 200, 500, 600],
+      "confidence": 0.9,
+      "distance": "about 2 meters",
+      "distanceMeters": 2.0,
+      "direction": "center",
+      "movement": "stationary",
       "inWalkingPath": true,
-      "priorityLevel": 1,
+      "priorityLevel": 2,
       "spokenAlert": "string"
     }
   ]

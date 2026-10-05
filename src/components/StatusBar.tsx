@@ -19,8 +19,6 @@ export const StatusBar: React.FC<StatusBarProps> = ({ status, currentMode }) => 
         return 'READ';
       case 'describe':
         return 'DESCRIBE';
-      case 'ask_ai':
-        return 'ASK AI';
       case 'emergency':
         return 'EMERGENCY';
       default:

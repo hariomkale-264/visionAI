@@ -10,16 +10,21 @@ import { EmergencyModal } from './components/EmergencyModal';
 import { NavigationSearchModal } from './components/NavigationSearchModal';
 import { SettingsModal } from './components/SettingsModal';
 import { LanguageModal } from './components/LanguageModal';
+import { VoiceHelpModal } from './components/VoiceHelpModal';
+import { DetectionPanel } from './components/DetectionPanel';
+import { DetectionSettings } from './components/DetectionSettings';
+import { ProximityWarning } from './components/ProximityWarning';
 import { OfflineIndicator } from './pwa/OfflineIndicator';
 import { useOnlineStatus } from './pwa/useOnlineStatus';
 
 import { cameraManager } from './camera/CameraManager';
-import { speechManager } from './voice/SpeechManager';
-import { speechRecognitionManager } from './voice/SpeechRecognitionManager';
+import { audioManager } from './voice/AudioManager';
+import { speechRecognitionManager, VoiceSessionState } from './voice/SpeechRecognitionManager';
+import { CommandRouter } from './voice/CommandRouter';
 import { visionEngine } from './vision/VisionEngine';
 import { navigationManager } from './navigation/NavigationManager';
 import { audioOutputManager } from './utils/audioOutputManager';
-import { notificationManager } from './utils/notificationManager';
+import { useObjectDetection } from './hooks/useObjectDetection';
 
 import {
   AppMode,
@@ -31,16 +36,20 @@ import {
   AppLanguage,
   SUPPORTED_LANGUAGES,
 } from './types';
+import { Terminal, ChevronDown, ChevronUp } from 'lucide-react';
 
 export default function App() {
   const isOnline = useOnlineStatus();
+  const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Mode and Assistance State
+  // Mode and Assistance State (4 core modes: assist, navigation, read, describe, emergency)
   const [currentMode, setCurrentMode] = useState<AppMode>('assist');
   const [isAssistanceActive, setIsAssistanceActive] = useState<boolean>(false);
   const [detectedObjects, setDetectedObjects] = useState<DetectedObject[]>([]);
   const [lastSpokenText, setLastSpokenText] = useState<string>('');
   const [currentTranscript, setCurrentTranscript] = useState<string>('');
+  const [voiceSessionState, setVoiceSessionState] = useState<VoiceSessionState>('IDLE');
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
 
   // Device Statuses
   const [cameraStatus, setCameraStatus] = useState<'connected' | 'disconnected' | 'denied' | 'requesting'>(
@@ -53,12 +62,36 @@ export default function App() {
   const [bluetoothStatus, setBluetoothStatus] = useState<'connected' | 'disconnected'>('disconnected');
   const [aiStatus, setAiStatus] = useState<'ready' | 'processing' | 'error' | 'unavailable'>('ready');
 
+  // Real-Time Browser-Native Object Detection Hook
+  const {
+    detections: realTimeDetections,
+    detectionHistory,
+    settings: detectionSettings,
+    fps: detectionFps,
+    isModelLoaded,
+    isModelLoading,
+    modelError: detectionModelError,
+    objectCounts,
+    updateSettings: updateDetectionSettings,
+    clearHistory: clearDetectionHistory,
+  } = useObjectDetection({
+    videoRef,
+    cameraStatus,
+  });
+
+  const [isDetectionSettingsOpen, setIsDetectionSettingsOpen] = useState(false);
+
   // Navigation State
   const [isNavigating, setIsNavigating] = useState(false);
   const [navRoute, setNavRoute] = useState<NavigationRoute | null>(null);
   const [currentCoords, setCurrentCoords] = useState<UserCoordinates | null>(null);
   const [searchCandidates, setSearchCandidates] = useState<SearchResultPlace[] | null>(null);
   const [pendingDestination, setPendingDestination] = useState<SearchResultPlace | null>(null);
+  const [pendingDestinationText, setPendingDestinationText] = useState<string | null>(null);
+  const [waitingForConfirmation, setWaitingForConfirmation] = useState(false);
+
+  // Diagnostics panel visibility
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   // User Settings State (Local Storage)
   const [homeAddress, setHomeAddress] = useState<string>(() => {
@@ -73,9 +106,10 @@ export default function App() {
 
   // Language State
   const [currentLanguage, setCurrentLanguage] = useState<string>(() => {
-    return localStorage.getItem('vg_language') || 'en-US';
+    return localStorage.getItem('vg_language') || 'en-IN';
   });
   const [isLanguageOpen, setIsLanguageOpen] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   // Modal Visibility
   const [isSetupOpen, setIsSetupOpen] = useState<boolean>(() => {
@@ -88,7 +122,7 @@ export default function App() {
   const handleSelectLanguage = useCallback((lang: AppLanguage) => {
     setCurrentLanguage(lang.code);
     localStorage.setItem('vg_language', lang.code);
-    speechManager.setLanguage(lang.code);
+    audioManager.setLanguage(lang.code);
     speechRecognitionManager.setLanguage(lang.code);
     visionEngine.setLanguage(lang.code);
 
@@ -96,25 +130,31 @@ export default function App() {
     if (lang.code.startsWith('hi')) {
       confirmation = `भाषा हिंदी में सेट की गई है।`;
     } else if (lang.code.startsWith('mr')) {
-      confirmation = `भाषा मराठी मध्ये सेट केली आहे.`;
-    } else if (lang.code.startsWith('es')) {
-      confirmation = `Idioma cambiado a español.`;
-    } else if (lang.code.startsWith('fr')) {
-      confirmation = `Langue changée en français.`;
-    } else if (lang.code.startsWith('de')) {
-      confirmation = `Sprache auf Deutsch geändert.`;
-    } else if (lang.code.startsWith('ja')) {
-      confirmation = `言語を日本語に切り替えました。`;
-    } else if (lang.code.startsWith('ar')) {
-      confirmation = `تم تغيير اللغة إلى العربية.`;
+      confirmation = `भाषा मराठी मध्ये सेट केली आहे।`;
+    } else if (lang.code.startsWith('gu')) {
+      confirmation = `ભાષા ગુજરાતીમાં સેટ થઈ ગઈ છે.`;
+    } else if (lang.code.startsWith('bn')) {
+      confirmation = `ভাষা বাংলায় সেট করা হয়েছে।`;
+    } else if (lang.code.startsWith('ta')) {
+      confirmation = `மொழி தமிழாக மாற்றப்பட்டது.`;
+    } else if (lang.code.startsWith('te')) {
+      confirmation = `భాష తెలుగుకి మార్చబడింది.`;
+    } else if (lang.code.startsWith('kn')) {
+      confirmation = `ಭಾಷೆಯನ್ನು ಕನ್ನಡಕ್ಕೆ ಬದಲಾಯಿಸಲಾಗಿದೆ.`;
+    } else if (lang.code.startsWith('ml')) {
+      confirmation = `ഭാഷ മലയാളത്തിലേക്ക് മാറ്റി.`;
+    } else if (lang.code.startsWith('pa')) {
+      confirmation = `ਭਾਸ਼ਾ ਪੰਜਾਬੀ ਵਿੱਚ ਬਦਲੀ ਗਈ ਹੈ।`;
+    } else if (lang.code.startsWith('ur')) {
+      confirmation = `زبان اردو میں تبدیل کر دی گئی ہے۔`;
     }
-    speechManager.speak(confirmation, 4, true);
+    audioManager.speak(confirmation, 4, true);
   }, []);
 
   // Sync initial language
   useEffect(() => {
-    const saved = localStorage.getItem('vg_language') || 'en-US';
-    speechManager.setLanguage(saved);
+    const saved = localStorage.getItem('vg_language') || 'en-IN';
+    audioManager.setLanguage(saved);
     speechRecognitionManager.setLanguage(saved);
     visionEngine.setLanguage(saved);
   }, []);
@@ -124,34 +164,41 @@ export default function App() {
   isNavigatingRef.current = isNavigating;
   const isAssistanceActiveRef = useRef(isAssistanceActive);
   isAssistanceActiveRef.current = isAssistanceActive;
-  const pendingDestRef = useRef(pendingDestination);
-  pendingDestRef.current = pendingDestination;
-  const searchCandidatesRef = useRef(searchCandidates);
-  searchCandidatesRef.current = searchCandidates;
+  const waitingForConfirmationRef = useRef(waitingForConfirmation);
+  waitingForConfirmationRef.current = waitingForConfirmation;
+  const currentModeRef = useRef(currentMode);
+  currentModeRef.current = currentMode;
 
   // 1. Initialize Subsystems & Listeners
   useEffect(() => {
-    // Camera Status Listener
     const unsubCamera = cameraManager.onStatusChange((status) => {
       setCameraStatus(status);
     });
 
-    // Mic Status Listener
     const unsubMic = speechRecognitionManager.onStatusChange((status) => {
       setMicStatus(status);
     });
 
-    // Spoken Manager Feedback Listener
-    const unsubSpeech = speechManager.subscribe((msg) => {
+    const unsubVoiceState = speechRecognitionManager.onSessionStateChange((state) => {
+      setVoiceSessionState(state);
+    });
+
+    const unsubSpeech = audioManager.subscribe((msg) => {
       setLastSpokenText(msg);
     });
 
-    // Bluetooth / Earbud Audio Output Listener
+    const unsubSpeaking = audioManager.onSpeakingChange((speaking) => {
+      setIsSpeaking(speaking);
+    });
+
     const unsubAudio = audioOutputManager.subscribe((status) => {
       setBluetoothStatus(status);
     });
 
-    // Navigation State Listener
+    const unsubVision = visionEngine.onDetection((objects) => {
+      setDetectedObjects(objects);
+    });
+
     const unsubNav = navigationManager.subscribe((navState) => {
       setIsNavigating(navState.isNavigating);
       setNavRoute(navState.route);
@@ -159,327 +206,274 @@ export default function App() {
       setGpsStatus(navState.status);
       setSearchCandidates(navState.searchCandidates);
       setPendingDestination(navState.pendingDestination);
+      setPendingDestinationText(navState.pendingDestinationText);
+      setWaitingForConfirmation(navState.waitingForConfirmation);
     });
-
-    // Vision Engine Detection Listener
-    const unsubVision = visionEngine.onDetection((objects) => {
-      setDetectedObjects(objects);
-      setAiStatus('ready');
-    });
-
-    // PWA Section 44: Foreground recovery when browser unfreezes/resumes
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        if (isAssistanceActiveRef.current && !cameraManager.isConnected()) {
-          cameraManager.start('environment').then((ok) => {
-            if (ok) {
-              speechManager.speak('VisionGuide resumed.', 4);
-              visionEngine.startLoop('assist');
-            }
-          });
-        }
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
       unsubCamera();
       unsubMic();
+      unsubVoiceState();
       unsubSpeech();
+      unsubSpeaking();
       unsubAudio();
-      unsubNav();
       unsubVision();
+      unsubNav();
     };
   }, []);
 
-  // Sync navigation context with vision engine for walking path awareness
-  useEffect(() => {
-    if (navRoute && isNavigating) {
-      const step = navRoute.steps[navRoute.currentStepIndex];
-      visionEngine.setWalkingContext(
-        `Walking to ${navRoute.destinationName}. Current maneuver: ${step?.instruction || 'continue'}`
-      );
-    } else {
-      visionEngine.setWalkingContext('Standing or general walking path');
-    }
-  }, [navRoute, isNavigating]);
-
-  // 2. Start Assistance Action
+  // 2. Start Assistance (Starts camera and initiates continuous microphone listening)
   const handleStartAssistance = useCallback(async () => {
-    speechManager.speak('AI assistance started.', 3, true);
-    setIsAssistanceActive(true);
-    setCurrentMode('assist');
+    audioManager.speak('Starting Vision AI assistant. Activating camera.', 4, true);
 
-    // Start physical camera
-    const started = await cameraManager.start('environment');
-    if (started) {
-      speechManager.speak('Camera connected.', 4);
-      visionEngine.startLoop('assist');
-      setAiStatus('processing');
-    } else {
-      speechManager.speak(
-        'Camera access is unavailable. Please allow camera permission.',
+    const cameraStarted = await cameraManager.start('environment');
+    if (!cameraStarted) {
+      audioManager.speak(
+        'Camera access was denied or is unavailable. Please enable camera permissions or use the test feed.',
         2,
         true
       );
     }
 
-    // Start hands-free speech recognition
-    speechRecognitionManager.start();
+    visionEngine.startLoop(currentModeRef.current);
+    setIsAssistanceActive(true);
+    setAiStatus('ready');
+
+    // Continuous listening starts immediately and stays active across all commands until Stop is clicked
+    await speechRecognitionManager.startContinuousListening(true);
+    audioManager.speak('Microphone is listening continuously. Say any command hands-free.', 4, false);
   }, []);
 
-  // 3. Stop Assistance Action
+  // 3. Stop Assistance (The ONLY action that stops the continuous microphone mode)
   const handleStopAssistance = useCallback(() => {
-    setIsAssistanceActive(false);
+    // 1. Completely stop speech recognition and release mic tracks
+    speechRecognitionManager.stopContinuousListening();
+
+    // 2. Stop camera and vision loop
     visionEngine.stopLoop();
     cameraManager.stop();
-    speechManager.speak('AI assistance stopped.', 3, true);
+
+    // 3. Update state
+    setIsAssistanceActive(false);
     setDetectedObjects([]);
+
+    audioManager.speak('Vision AI assistant stopped. Microphone stopped.', 4, true);
   }, []);
 
-  const handleToggleAssistance = useCallback(() => {
+  const handleToggleAssistance = () => {
     if (isAssistanceActive) {
       handleStopAssistance();
     } else {
       handleStartAssistance();
     }
-  }, [isAssistanceActive, handleStartAssistance, handleStopAssistance]);
+  };
 
-  // 4. Mode Selection (Read, Describe, Ask AI, Navigation, Emergency)
+  // 4. Select Card Mode
   const handleSelectMode = useCallback(
     async (mode: AppMode) => {
       setCurrentMode(mode);
 
-      // Ensure camera is active for vision modes
-      if (mode === 'read' || mode === 'describe' || mode === 'ask_ai') {
+      if (mode === 'read' || mode === 'describe') {
         if (!cameraManager.isConnected()) {
           const started = await cameraManager.start('environment');
           if (!started) {
-            speechManager.speak('Camera access is required for vision modes.', 2, true);
+            audioManager.speak('Camera access is required for vision modes.', 2, true);
             return;
           }
         }
       }
 
-      if (mode === 'read') {
-        speechManager.speak('Read mode. Point your camera at text or signboards.', 3, true);
+      if (mode === 'navigation') {
+        audioManager.speak('Navigation mode activated. Where would you like to walk?', 3, true);
+        setIsNavSearchOpen(true);
+      } else if (mode === 'read') {
+        audioManager.speak('Read text mode. Analyzing camera frame for visible text.', 4, true);
         setAiStatus('processing');
-        await visionEngine.sampleAndAnalyze('read');
+        await visionEngine.readText();
         setAiStatus('ready');
       } else if (mode === 'describe') {
-        speechManager.speak('Analyzing surroundings...', 3, true);
+        audioManager.speak('Analyzing surroundings...', 4, true);
         setAiStatus('processing');
-        await visionEngine.sampleAndAnalyze('describe');
+        await visionEngine.describeSurroundings();
         setAiStatus('ready');
-      } else if (mode === 'ask_ai') {
-        speechManager.speak('Ask AI mode. What would you like to know about your view?', 3, true);
       } else if (mode === 'emergency') {
+        audioManager.speak('Emergency mode opened.', 1, true);
         setIsEmergencyOpen(true);
       }
     },
     []
   );
 
-  // 5. Voice Command Parser & Processor
+  // 5. Intelligent Voice Command Handler (Microphone automatically continues listening after command execution!)
   const handleVoiceCommand = useCallback(
     async (rawCommand: string) => {
-      const cmd = rawCommand.toLowerCase().trim();
+      if (!rawCommand || !rawCommand.trim()) return;
+
       setCurrentTranscript(rawCommand);
+      setTimeout(() => setCurrentTranscript(''), 4500);
 
-      // Clear transcript display after 4s
-      setTimeout(() => setCurrentTranscript(''), 4000);
+      const intent = CommandRouter.parse(rawCommand);
 
-      // Pending Destination Confirmation ("yes" / "no")
-      if (pendingDestRef.current) {
-        if (cmd.includes('yes') || cmd.includes('start') || cmd.includes('sure') || cmd.includes('confirm')) {
+      // Emergency
+      if (intent.type === 'EMERGENCY') {
+        setIsEmergencyOpen(true);
+        audioManager.speak('Emergency mode triggered. Help is available.', 1, true);
+        return;
+      }
+
+      // Stop speech
+      if (intent.type === 'STOP_SPEECH') {
+        audioManager.stop();
+        return;
+      }
+
+      // Repeat
+      if (intent.type === 'REPEAT_LAST') {
+        if (isNavigatingRef.current) {
+          navigationManager.repeatInstruction();
+        } else {
+          audioManager.repeatLastMessage();
+        }
+        return;
+      }
+
+      // Navigation Confirmation
+      if (waitingForConfirmationRef.current) {
+        if (intent.type === 'CONFIRM_NAVIGATION') {
           navigationManager.confirmPendingDestination(true);
           return;
         }
-        if (cmd.includes('no') || cmd.includes('cancel') || cmd.includes('stop')) {
+        if (intent.type === 'CANCEL_NAVIGATION') {
           navigationManager.confirmPendingDestination(false);
           return;
         }
       }
 
-      // Candidate Selection ("the first one", "the second one", "option one")
-      if (searchCandidatesRef.current && searchCandidatesRef.current.length > 0) {
-        if (cmd.includes('first') || cmd.includes('one') || cmd.includes('1')) {
-          navigationManager.selectCandidate(0);
-          return;
+      // Go to Object Detection Section
+      if (intent.type === 'GO_TO_OBJECT_DETECTION') {
+        const section = document.getElementById('object-detection-section');
+        if (section) {
+          section.scrollIntoView({ behavior: 'smooth' });
         }
-        if (cmd.includes('second') || cmd.includes('two') || cmd.includes('2')) {
-          navigationManager.selectCandidate(1);
-          return;
-        }
-        if (cmd.includes('third') || cmd.includes('three') || cmd.includes('3')) {
-          navigationManager.selectCandidate(2);
-          return;
-        }
-      }
-
-      // Emergency Command
-      if (cmd.includes('emergency') || cmd.includes('sos') || cmd.includes('help me')) {
-        setIsEmergencyOpen(true);
-        speechManager.speak('Emergency mode triggered. I can call your emergency contact.', 1, true);
+        audioManager.speak('Navigated to object detection section.', 4, true);
         return;
       }
 
-      // Repeat Command
-      if (cmd.includes('repeat') || cmd.includes('what did you say') || cmd.includes('again')) {
-        if (isNavigatingRef.current) {
-          navigationManager.repeatInstruction();
+      // Start Camera
+      if (intent.type === 'START_CAMERA') {
+        await cameraManager.start('environment');
+        audioManager.speak('Camera started.', 4, true);
+        return;
+      }
+
+      // Stop Camera
+      if (intent.type === 'STOP_CAMERA') {
+        cameraManager.stop();
+        audioManager.speak('Camera stopped.', 4, true);
+        return;
+      }
+
+      // Go Back
+      if (intent.type === 'GO_BACK') {
+        setCurrentMode('assist');
+        audioManager.speak('Returned to main assistance view.', 4, true);
+        return;
+      }
+
+      // Help
+      if (intent.type === 'HELP') {
+        setIsHelpOpen(true);
+        const text =
+          'Available commands include: Go to object detection, Go to navigation, Start camera, Read text, Describe this, Emergency, Stop, Repeat, and Take me to your destination.';
+        audioManager.speak(text, 4, true);
+        return;
+      }
+
+      // Camera Switch
+      if (intent.type === 'SWITCH_CAMERA') {
+        if (intent.target === 'user') {
+          await cameraManager.switchToLaptopCamera();
+          audioManager.speak('Switched to laptop webcam.', 4, true);
+        } else if (intent.target === 'environment') {
+          await cameraManager.switchToRearCamera();
+          audioManager.speak('Switched to rear camera.', 4, true);
         } else {
-          speechManager.repeatLastMessage();
+          await cameraManager.toggleCamera();
+          audioManager.speak('Camera toggled.', 4, true);
         }
         return;
       }
 
-      // Start / Stop Assistance
-      if (cmd.includes('start assistance') || cmd.includes('start assist') || cmd.includes('start vision')) {
+      // Start / Stop Assistant
+      if (intent.type === 'START_ASSIST') {
         handleStartAssistance();
         return;
       }
-      if (cmd.includes('stop assistance') || cmd.includes('stop assist') || cmd.includes('stop vision')) {
+      if (intent.type === 'STOP_ASSIST') {
         handleStopAssistance();
         return;
       }
 
-      // Language Switch Commands (e.g. "switch to Hindi", "change language to Marathi")
-      if (
-        cmd.includes('language') ||
-        cmd.includes('switch to') ||
-        cmd.includes('change to') ||
-        cmd.includes('speak in') ||
-        cmd.includes('bhasha')
-      ) {
-        if (cmd.includes('hindi')) {
-          const l = SUPPORTED_LANGUAGES.find((x) => x.code === 'hi-IN');
-          if (l) {
-            handleSelectLanguage(l);
-            return;
-          }
-        }
-        if (cmd.includes('marathi')) {
-          const l = SUPPORTED_LANGUAGES.find((x) => x.code === 'mr-IN');
-          if (l) {
-            handleSelectLanguage(l);
-            return;
-          }
-        }
-        if (cmd.includes('spanish') || cmd.includes('espanol') || cmd.includes('español')) {
-          const l = SUPPORTED_LANGUAGES.find((x) => x.code === 'es-ES');
-          if (l) {
-            handleSelectLanguage(l);
-            return;
-          }
-        }
-        if (cmd.includes('french') || cmd.includes('francais') || cmd.includes('français')) {
-          const l = SUPPORTED_LANGUAGES.find((x) => x.code === 'fr-FR');
-          if (l) {
-            handleSelectLanguage(l);
-            return;
-          }
-        }
-        if (cmd.includes('german') || cmd.includes('deutsch')) {
-          const l = SUPPORTED_LANGUAGES.find((x) => x.code === 'de-DE');
-          if (l) {
-            handleSelectLanguage(l);
-            return;
-          }
-        }
-        if (cmd.includes('japanese')) {
-          const l = SUPPORTED_LANGUAGES.find((x) => x.code === 'ja-JP');
-          if (l) {
-            handleSelectLanguage(l);
-            return;
-          }
-        }
-        if (cmd.includes('arabic')) {
-          const l = SUPPORTED_LANGUAGES.find((x) => x.code === 'ar-SA');
-          if (l) {
-            handleSelectLanguage(l);
-            return;
-          }
-        }
-        if (cmd.includes('english')) {
-          const l = SUPPORTED_LANGUAGES.find((x) => x.code === 'en-US');
-          if (l) {
-            handleSelectLanguage(l);
-            return;
-          }
-        }
-        if (cmd.includes('language') || cmd.includes('bhasha')) {
-          setIsLanguageOpen(true);
-          speechManager.speak('Select your preferred language.', 4, true);
-          return;
-        }
-      }
-
-      // Navigation Status Queries
-      if (cmd.includes('next turn') || cmd.includes("what's the next turn") || cmd.includes('what is the next turn')) {
-        navigationManager.announceNextTurn();
+      // Modes
+      if (intent.type === 'OPEN_NAVIGATION') {
+        handleSelectMode('navigation');
         return;
       }
-      if (cmd.includes('how far') || cmd.includes('distance') || cmd.includes('how long')) {
-        navigationManager.announceDistanceRemaining();
-        return;
-      }
-      if (cmd.includes('stop navigation') || cmd.includes('cancel navigation') || cmd.includes('exit navigation')) {
-        navigationManager.stopNavigation();
-        return;
-      }
-      if (cmd.includes('pause navigation')) {
-        navigationManager.pauseNavigation();
-        return;
-      }
-      if (cmd.includes('resume navigation')) {
-        navigationManager.resumeNavigation();
-        return;
-      }
-
-      // Where am I / Location query
-      if (cmd.includes('where am i') || cmd.includes('my location') || cmd.includes('current position')) {
-        const coords = navigationManager.getCurrentCoords();
-        if (coords) {
-          speechManager.speak(
-            `You are at approximate coordinates: latitude ${coords.latitude.toFixed(4)}, longitude ${coords.longitude.toFixed(4)}. Accuracy is within ${Math.round(coords.accuracy)} meters.`,
-            3,
-            true
-          );
-        } else {
-          speechManager.speak('GPS location is currently unavailable. Please verify GPS permissions.', 3, true);
-        }
-        return;
-      }
-
-      // Read This / OCR Command
-      if (cmd.includes('read') || cmd.includes('read this') || cmd.includes('read text') || cmd.includes('read sign')) {
+      if (intent.type === 'READ_TEXT') {
         handleSelectMode('read');
         return;
       }
-
-      // Describe Surroundings Command
-      if (
-        cmd.includes('describe') ||
-        cmd.includes("what's ahead") ||
-        cmd.includes('what is ahead') ||
-        cmd.includes('what is around me') ||
-        cmd.includes("what's around me") ||
-        cmd.includes('surroundings')
-      ) {
+      if (intent.type === 'DESCRIBE') {
         handleSelectMode('describe');
         return;
       }
 
-      // Take Me Home Command
-      if (cmd.includes('take me home') || cmd.includes('go home') || cmd.includes('navigate home')) {
-        if (!homeAddress) {
-          speechManager.speak(
-            'Your home address is not configured. Please set your home address in settings.',
+      // Destination Navigation
+      if (intent.type === 'NAVIGATE_TO') {
+        setCurrentMode('navigation');
+        navigationManager.handleDestinationRequest(intent.destination);
+        return;
+      }
+
+      // Multilingual
+      if (intent.type === 'CHANGE_LANGUAGE') {
+        const lang = SUPPORTED_LANGUAGES.find((l) => l.code === intent.languageCode);
+        if (lang) {
+          handleSelectLanguage(lang);
+        }
+        return;
+      }
+
+      // Queries
+      const lower = rawCommand.toLowerCase();
+      if (lower.includes('next turn')) {
+        navigationManager.announceNextTurn();
+        return;
+      }
+      if (lower.includes('how far') || lower.includes('how long')) {
+        navigationManager.announceDistanceRemaining();
+        return;
+      }
+      if (lower.includes('stop navigation')) {
+        navigationManager.stopNavigation();
+        return;
+      }
+      if (lower.includes('where am i')) {
+        const coords = navigationManager.getCurrentCoords();
+        if (coords) {
+          audioManager.speak(
+            `You are at latitude ${coords.latitude.toFixed(4)}, longitude ${coords.longitude.toFixed(4)}. Accuracy within ${Math.round(coords.accuracy)} meters.`,
             3,
             true
           );
+        } else {
+          audioManager.speak('GPS location is currently unavailable. Please verify location permissions.', 3, true);
+        }
+        return;
+      }
+      if (lower.includes('take me home')) {
+        if (!homeAddress) {
+          audioManager.speak('Home address is not configured. Please enter your home address.', 3, true);
           setIsSettingsOpen(true);
         } else {
           navigationManager.handleDestinationRequest(homeAddress);
@@ -487,38 +481,19 @@ export default function App() {
         return;
       }
 
-      // "I want to go to [destination]" or "Take me to [destination]" or "Navigate to [destination]"
-      const destPatterns = [
-        /(?:i want to go to|take me to|navigate to|go to|find the nearest|find a nearest|find|directions to)\s+(.+)/i,
-      ];
-      for (const pattern of destPatterns) {
-        const match = cmd.match(pattern);
-        if (match && match[1]) {
-          const dest = match[1].trim();
-          navigationManager.handleDestinationRequest(dest);
-          return;
-        }
-      }
-
-      // General "What is this?" or Ask AI
-      if (cmd.includes('what is this') || cmd.includes('what is that') || cmd.includes('ask ai')) {
-        setCurrentMode('ask_ai');
-        speechManager.speak('Examining object...', 4);
-        setAiStatus('processing');
-        await visionEngine.sampleAndAnalyze('ask_ai', rawCommand);
-        setAiStatus('ready');
-        return;
-      }
-
-      // If user asks generic question while in ask_ai mode
-      if (currentMode === 'ask_ai') {
-        setAiStatus('processing');
-        await visionEngine.sampleAndAnalyze('ask_ai', rawCommand);
-        setAiStatus('ready');
-        return;
+      if (currentModeRef.current === 'read') {
+        visionEngine.readText();
+      } else if (currentModeRef.current === 'describe') {
+        visionEngine.describeSurroundings();
+      } else {
+        audioManager.speak(
+          'Command recognized. Say "Help" for available voice commands, or "Take me to" followed by your destination.',
+          4,
+          false
+        );
       }
     },
-    [homeAddress, handleSelectMode, handleStartAssistance, handleStopAssistance, currentMode]
+    [handleSelectMode, handleStartAssistance, handleStopAssistance, handleSelectLanguage, homeAddress]
   );
 
   // 6. Connect Speech Recognition Transcripts
@@ -534,14 +509,14 @@ export default function App() {
     };
   }, [handleVoiceCommand]);
 
-  // 7. Toggle Mic push/listen
-  const handleToggleMic = () => {
-    if (micStatus === 'listening') {
-      speechRecognitionManager.stop();
-      speechManager.speak('Microphone paused.', 4);
+  // 7. Toggle Mic
+  const handleToggleMic = async () => {
+    if (speechRecognitionManager.isContinuousListening()) {
+      speechRecognitionManager.stopContinuousListening();
+      audioManager.speak('Microphone stopped.', 4, true);
     } else {
-      speechRecognitionManager.start();
-      speechManager.speak('Microphone listening.', 4);
+      await speechRecognitionManager.startContinuousListening(true);
+      audioManager.speak('Microphone listening continuously.', 4, true);
     }
   };
 
@@ -575,6 +550,8 @@ export default function App() {
     ai: aiStatus,
   };
 
+  const isContinuous = speechRecognitionManager.isContinuousListening();
+
   return (
     <div className="min-h-screen bg-white text-neutral-900 flex flex-col justify-between selection:bg-neutral-900 selection:text-white">
       {/* 1. Accessible Skip Navigation Link */}
@@ -591,7 +568,7 @@ export default function App() {
         onOpenLanguage={() => setIsLanguageOpen(true)}
         currentLanguage={currentLanguage}
         onOpenEmergency={() => {
-          speechManager.speak('Emergency mode opened.', 2, true);
+          audioManager.speak('Emergency mode opened.', 1, true);
           setIsEmergencyOpen(true);
         }}
       />
@@ -601,48 +578,114 @@ export default function App() {
 
       {/* 4. Main Scrollable Container */}
       <main id="main-content" className="flex-1 w-full max-w-4xl mx-auto px-4 py-4 space-y-4">
-        {/* Physical Rear Camera Feed with Obstacle Visuals */}
+        {/* Proximity Warning Alert if any obstacle is < 1.5m */}
+        <ProximityWarning detections={realTimeDetections} />
+
+        {/* Live Device Camera Feed (Rear Camera or Laptop Webcam) with Real-Time Bounding Boxes */}
         <CameraFeed
+          videoRef={videoRef}
           cameraStatus={cameraStatus}
           detectedObjects={detectedObjects}
+          realTimeDetections={realTimeDetections}
+          detectionSettings={detectionSettings}
           onStartCamera={async () => {
             await cameraManager.start('environment');
           }}
           isAssistanceActive={isAssistanceActive}
         />
 
-        {/* Active Walking Navigation Turn-by-Turn Display */}
+        {/* Real-Time In-Browser AI Object Detection Panel with id for smooth scrolling */}
+        <div id="object-detection-section">
+          <DetectionPanel
+            detections={realTimeDetections}
+            history={detectionHistory}
+            objectCounts={objectCounts}
+            fps={detectionFps}
+            isModelLoaded={isModelLoaded}
+            isModelLoading={isModelLoading}
+            modelError={detectionModelError}
+            settings={detectionSettings}
+            onOpenSettings={() => setIsDetectionSettingsOpen(true)}
+            onClearHistory={clearDetectionHistory}
+          />
+        </div>
+
+        {/* Active Walking Navigation Turn-by-Turn Display & Google Maps Confirmation */}
         <NavigationDisplay
           route={navRoute}
           isNavigating={isNavigating}
           searchCandidates={searchCandidates}
           pendingDestination={pendingDestination}
+          pendingDestinationText={pendingDestinationText}
           onConfirmDestination={(accepted) => navigationManager.confirmPendingDestination(accepted)}
-          onSelectCandidate={(idx) => navigationManager.selectCandidate(idx)}
+          onSelectCandidate={(idx) => {
+            if (searchCandidates && searchCandidates[idx]) {
+              navigationManager.confirmPendingDestination(true);
+            }
+          }}
           onRepeatInstruction={() => navigationManager.repeatInstruction()}
           onStopNavigation={() => navigationManager.stopNavigation()}
-          onRecalculate={() => navigationManager.recalculateRoute()}
+          onRecalculate={() => {
+            if (navRoute) {
+              navigationManager.openGoogleMapsNavigation(navRoute.destinationName, navRoute.destinationCoords);
+            }
+          }}
           onOpenPhoneMap={() => navigationManager.openExternalMap()}
         />
 
-        {/* Primary Mode Controls: ASSIST / NAVIGATION / READ / DESCRIBE / ASK AI / EMERGENCY */}
+        {/* Primary 4 Feature Cards: NAVIGATION / READ TEXT / DESCRIBE / EMERGENCY */}
         <ModeSelector
           currentMode={currentMode}
           isAssistanceActive={isAssistanceActive}
           onToggleAssistance={handleToggleAssistance}
           onSelectMode={handleSelectMode}
           onOpenEmergency={() => setIsEmergencyOpen(true)}
-          onOpenNavigationSearch={() => setIsNavSearchOpen(true)}
+          onOpenNavigation={() => handleSelectMode('navigation')}
         />
+
+        {/* Collapsible Developer Diagnostics Panel */}
+        <div className="pt-1">
+          <button
+            onClick={() => setShowDiagnostics(!showDiagnostics)}
+            className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-800 transition py-1 focus:outline-none"
+          >
+            <Terminal className="h-3.5 w-3.5" />
+            <span>Developer Diagnostics</span>
+            {showDiagnostics ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+          </button>
+
+          {showDiagnostics && (
+            <div className="mt-2 rounded-2xl border border-neutral-200 bg-neutral-50 p-3.5 text-xs font-mono space-y-1 text-neutral-700">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div>Camera: <strong className="text-neutral-900">{cameraStatus} ({cameraManager.getLabel()})</strong></div>
+                <div>Microphone: <strong className="text-neutral-900">{micStatus}</strong></div>
+                <div>Continuous Mic: <strong className="text-neutral-900">{isContinuous ? 'ACTIVE (Listening continuously)' : 'STOPPED'}</strong></div>
+                <div>Voice State: <strong className="text-neutral-900">{voiceSessionState}</strong></div>
+                <div>GPS Status: <strong className="text-neutral-900">{gpsStatus}</strong></div>
+                <div>TTS State: <strong className="text-neutral-900">{isSpeaking ? 'Speaking' : 'Idle'}</strong></div>
+                <div>Detection Model: <strong className="text-neutral-900">{isModelLoaded ? 'COCO-SSD Ready' : isModelLoading ? 'Loading...' : 'Error'}</strong></div>
+                <div>Detection FPS: <strong className="text-neutral-900">{detectionFps} FPS</strong></div>
+                <div>Live Detections: <strong className="text-neutral-900">{realTimeDetections.length} objects</strong></div>
+                <div>Language: <strong className="text-neutral-900">{currentLanguage}</strong></div>
+              </div>
+            </div>
+          )}
+        </div>
       </main>
 
-      {/* 5. Voice Interaction Bar (Voice-First Experience) */}
+      {/* 5. Voice Interaction Bar (Voice-First Experience with 🟢 Listening continuously / 🔴 Microphone stopped) */}
       <VoiceAssistantBar
         micStatus={micStatus}
+        voiceState={voiceSessionState}
+        isContinuousListening={isContinuous}
         currentTranscript={currentTranscript}
         lastSpokenText={lastSpokenText}
+        isSpeaking={isSpeaking}
         onToggleMic={handleToggleMic}
         onQuickCommand={(cmd) => handleVoiceCommand(cmd)}
+        onStopSpeech={() => audioManager.stop()}
+        onRepeatSpeech={() => audioManager.repeatLastMessage()}
+        onOpenHelp={() => setIsHelpOpen(true)}
       />
 
       {/* 6. Offline Status Toast */}
@@ -653,7 +696,7 @@ export default function App() {
         isOpen={isSetupOpen}
         onComplete={handleSetupComplete}
         onRequestCamera={async () => cameraManager.start('environment')}
-        onRequestMic={() => speechRecognitionManager.start()}
+        onRequestMic={() => speechRecognitionManager.startContinuousListening(true)}
         onRequestGps={() => navigationManager.initGps()}
         cameraStatus={cameraStatus}
         micStatus={micStatus}
@@ -698,6 +741,20 @@ export default function App() {
         onClose={() => setIsLanguageOpen(false)}
         currentLanguage={currentLanguage}
         onSelectLanguage={handleSelectLanguage}
+      />
+
+      {/* 12. Voice Help Modal */}
+      <VoiceHelpModal
+        isOpen={isHelpOpen}
+        onClose={() => setIsHelpOpen(false)}
+      />
+
+      {/* 13. Object Detection Configuration Settings Modal */}
+      <DetectionSettings
+        settings={detectionSettings}
+        onUpdateSettings={updateDetectionSettings}
+        isOpen={isDetectionSettingsOpen}
+        onClose={() => setIsDetectionSettingsOpen(false)}
       />
     </div>
   );

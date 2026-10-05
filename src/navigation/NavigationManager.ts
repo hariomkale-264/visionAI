@@ -1,4 +1,4 @@
-import { speechManager } from '../voice/SpeechManager';
+import { audioManager } from '../voice/AudioManager';
 import { NavigationRoute, SearchResultPlace, UserCoordinates } from '../types';
 
 type NavigationStateChangeCallback = (state: {
@@ -9,6 +9,8 @@ type NavigationStateChangeCallback = (state: {
   status: 'available' | 'unavailable' | 'denied' | 'requesting';
   searchCandidates: SearchResultPlace[] | null;
   pendingDestination: SearchResultPlace | null;
+  pendingDestinationText: string | null;
+  waitingForConfirmation: boolean;
 }) => void;
 
 function calcDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -34,6 +36,8 @@ class NavigationManager {
   private currentRoute: NavigationRoute | null = null;
   private searchCandidates: SearchResultPlace[] | null = null;
   private pendingDestination: SearchResultPlace | null = null;
+  private pendingDestinationText: string | null = null;
+  private waitingForConfirmation = false;
   private listeners: Set<NavigationStateChangeCallback> = new Set();
   private lastAnnouncedStepIndex = -1;
   private lastOffRouteCheck = 0;
@@ -57,6 +61,8 @@ class NavigationManager {
       status: this.gpsStatus,
       searchCandidates: this.searchCandidates,
       pendingDestination: this.pendingDestination,
+      pendingDestinationText: this.pendingDestinationText,
+      waitingForConfirmation: this.waitingForConfirmation,
     };
     this.listeners.forEach((cb) => {
       try {
@@ -67,40 +73,45 @@ class NavigationManager {
     });
   }
 
-  public initGps() {
-    if (typeof window === 'undefined' || !navigator.geolocation) {
-      this.gpsStatus = 'unavailable';
+  public initGps(): Promise<UserCoordinates | null> {
+    return new Promise((resolve) => {
+      if (typeof window === 'undefined' || !navigator.geolocation) {
+        this.gpsStatus = 'unavailable';
+        this.notify();
+        resolve(null);
+        return;
+      }
+
+      this.gpsStatus = 'requesting';
       this.notify();
-      return;
-    }
 
-    this.gpsStatus = 'requesting';
-    this.notify();
-
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        this.currentCoords = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
-          heading: pos.coords.heading,
-          speed: pos.coords.speed,
-        };
-        this.gpsStatus = 'available';
-        this.startWatchingPosition();
-        this.notify();
-      },
-      (err) => {
-        console.warn('Geolocation error:', err.message);
-        if (err.code === err.PERMISSION_DENIED) {
-          this.gpsStatus = 'denied';
-        } else {
-          this.gpsStatus = 'unavailable';
-        }
-        this.notify();
-      },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 5000 }
-    );
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          this.currentCoords = {
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+            heading: pos.coords.heading,
+            speed: pos.coords.speed,
+          };
+          this.gpsStatus = 'available';
+          this.startWatchingPosition();
+          this.notify();
+          resolve(this.currentCoords);
+        },
+        (err) => {
+          console.warn('Geolocation error:', err.message);
+          if (err.code === err.PERMISSION_DENIED) {
+            this.gpsStatus = 'denied';
+          } else {
+            this.gpsStatus = 'unavailable';
+          }
+          this.notify();
+          resolve(null);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+      );
+    });
   }
 
   private startWatchingPosition() {
@@ -120,7 +131,7 @@ class NavigationManager {
         this.notify();
       },
       (err) => {
-        console.warn('WatchPosition update error:', err);
+        console.warn('WatchPosition error:', err);
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 2000 }
     );
@@ -132,6 +143,10 @@ class NavigationManager {
 
   public getGpsStatus() {
     return this.gpsStatus;
+  }
+
+  public isWaitingForConfirmation(): boolean {
+    return this.waitingForConfirmation;
   }
 
   public async searchDestination(query: string): Promise<SearchResultPlace[]> {
@@ -149,112 +164,122 @@ class NavigationManager {
       const res = await fetch(url);
       if (!res.ok) throw new Error('Search failed');
       const data = await res.json();
-      const results: SearchResultPlace[] = data.results || [];
-      return results;
+      return (data.results || []) as SearchResultPlace[];
     } catch (e) {
       console.error('Destination search error:', e);
       return [];
     }
   }
 
-  // Voice destination flow: extracts destination, asks confirmation if needed
+  /**
+   * SPECIFIC WORKFLOW FOR VOICE-BASED GOOGLE MAPS NAVIGATION:
+   * User: "I want to go to Pune Railway Station."
+   * AI: "Getting your current location."
+   * AI: "Your destination is Pune Railway Station. Do you want to start walking navigation?"
+   * User: "Yes."
+   * AI: "Opening Google Maps walking navigation."
+   */
   public async handleDestinationRequest(destinationText: string) {
+    const cleanDest = destinationText.trim();
+    if (!cleanDest) return;
+
+    audioManager.speak('Getting your current location.', 3, true);
+
+    // Refresh position if needed
     if (!this.currentCoords) {
-      speechManager.speak(
-        'Location is currently unavailable. Please enable GPS permissions so I can guide you.',
-        3,
-        true
-      );
-      return;
+      await this.initGps();
     }
 
-    speechManager.speak(`Searching for ${destinationText}...`, 4);
-    const results = await this.searchDestination(destinationText);
+    this.pendingDestinationText = cleanDest;
+    this.waitingForConfirmation = true;
 
-    if (results.length === 0) {
-      speechManager.speak(
-        `I could not find "${destinationText}". Please try naming a nearby landmark or spelling the address.`,
-        3,
-        true
-      );
-      return;
+    // Search place coordinates in parallel to verify place exists
+    const searchPlaces = await this.searchDestination(cleanDest);
+    if (searchPlaces.length > 0) {
+      this.pendingDestination = searchPlaces[0];
+    } else {
+      this.pendingDestination = null;
     }
 
-    if (results.length === 1) {
-      const place = results[0];
-      this.pendingDestination = place;
-      this.searchCandidates = null;
-      this.notify();
-
-      const distStr = place.distanceMeters ? ` about ${place.distanceMeters} meters away` : '';
-      speechManager.speak(
-        `I found ${place.name}${distStr}. Do you want walking directions? Say yes to start.`,
-        3,
-        true
-      );
-      return;
-    }
-
-    // Multiple results: Present accessible choice
-    this.searchCandidates = results.slice(0, 3);
-    this.pendingDestination = null;
     this.notify();
 
-    const first = results[0];
-    const second = results[1];
-    const firstDist = first.distanceMeters ? `${first.distanceMeters} meters away` : 'nearby';
-    const secondDist = second.distanceMeters ? `${second.distanceMeters} meters away` : 'further';
-
-    speechManager.speak(
-      `I found multiple matches. The first is ${first.name}, ${firstDist}. The second is ${second.name}, ${secondDist}. Which one would you like? Say the first one or the second one.`,
+    // Ask user confirmation
+    audioManager.speak(
+      `Your destination is ${cleanDest}. Do you want to start walking navigation? Say yes to start.`,
       3,
       true
     );
   }
 
-  public selectCandidate(index: number) {
-    if (!this.searchCandidates || !this.searchCandidates[index]) return;
-    const place = this.searchCandidates[index];
-    this.searchCandidates = null;
-    this.startNavigationTo(place);
-  }
-
   public confirmPendingDestination(accepted: boolean) {
-    if (!accepted) {
-      this.pendingDestination = null;
-      this.searchCandidates = null;
-      this.notify();
-      speechManager.speak('Navigation cancelled.', 4);
+    if (!this.waitingForConfirmation && !this.pendingDestination && !this.pendingDestinationText) {
       return;
     }
 
-    if (this.pendingDestination) {
-      const dest = this.pendingDestination;
+    if (!accepted) {
       this.pendingDestination = null;
+      this.pendingDestinationText = null;
+      this.waitingForConfirmation = false;
       this.searchCandidates = null;
-      this.startNavigationTo(dest);
+      this.notify();
+      audioManager.speak('Navigation cancelled.', 4, true);
+      return;
+    }
+
+    const destText = this.pendingDestinationText || this.pendingDestination?.name || 'destination';
+    this.waitingForConfirmation = false;
+    this.notify();
+
+    audioManager.speak(
+      'Opening Google Maps walking navigation. Please stay alert for obstacles and traffic.',
+      3,
+      true
+    );
+
+    // Open Google Maps walking directions
+    this.openGoogleMapsNavigation(destText, this.pendingDestination ? { lat: this.pendingDestination.lat, lon: this.pendingDestination.lon } : undefined);
+
+    // If destination place coordinates are available, also start in-app guide
+    if (this.pendingDestination) {
+      this.startNavigationTo(this.pendingDestination);
+    }
+  }
+
+  public openGoogleMapsNavigation(destination: string, coords?: { lat: number; lon: number }) {
+    let originParam = '';
+    if (this.currentCoords) {
+      originParam = `&origin=${this.currentCoords.latitude},${this.currentCoords.longitude}`;
+    }
+
+    let destParam = '';
+    if (coords) {
+      destParam = `&destination=${coords.lat},${coords.lon}`;
+    } else {
+      destParam = `&destination=${encodeURIComponent(destination)}`;
+    }
+
+    const mapsUrl = `https://www.google.com/maps/dir/?api=1${originParam}${destParam}&travelmode=walking`;
+
+    try {
+      window.open(mapsUrl, '_blank', 'noopener,noreferrer');
+    } catch (e) {
+      console.warn('window.open blocked, falling back to location.href:', e);
+      window.location.href = mapsUrl;
     }
   }
 
   public async startNavigationTo(place: SearchResultPlace) {
     if (!this.currentCoords) {
-      speechManager.speak('Current location is unavailable. Cannot calculate route.', 2, true);
       return;
     }
-
-    speechManager.speak(`Calculating walking route to ${place.name}...`, 4);
 
     try {
       const url = `/api/navigation/route?startLat=${this.currentCoords.latitude}&startLon=${this.currentCoords.longitude}&endLat=${place.lat}&endLon=${place.lon}`;
       const res = await fetch(url);
-      if (!res.ok) {
-        throw new Error('Route calculation failed');
-      }
+      if (!res.ok) throw new Error('Route calculation failed');
 
       const data = await res.json();
-      if (!data.steps || data.steps.length === 0) {
-        throw new Error('No walking route found');
-      }
+      if (!data.steps || data.steps.length === 0) return;
 
       this.currentRoute = {
         destinationName: place.name,
@@ -268,29 +293,15 @@ class NavigationManager {
 
       this.isNavigating = true;
       this.isPaused = false;
-      this.lastAnnouncedStepIndex = -1;
+      this.lastAnnouncedStepIndex = 0;
       this.notify();
 
-      const timeMinutes = Math.round(data.durationSeconds / 60);
-      speechManager.speak(
-        `Starting walking navigation to ${place.name}. Total distance is ${data.distanceMeters} meters, approximately ${timeMinutes} minutes.`,
-        3,
-        true
-      );
-
-      // Announce first step
       const firstStep = data.steps[0];
       if (firstStep) {
-        speechManager.speak(firstStep.instruction, 3, false);
-        this.lastAnnouncedStepIndex = 0;
+        audioManager.speak(firstStep.instruction, 3, false);
       }
     } catch (err: any) {
-      console.error('Route calculation error:', err);
-      speechManager.speak(
-        "I couldn't calculate the walking route. Please try another destination.",
-        3,
-        true
-      );
+      console.warn('In-app route background calculation warning:', err);
     }
   }
 
@@ -311,7 +322,7 @@ class NavigationManager {
 
     if (distToDest <= 15) {
       this.isNavigating = false;
-      speechManager.speak(
+      audioManager.speak(
         `You have arrived at your destination: ${route.destinationName}. Navigation completed.`,
         2,
         true
@@ -320,7 +331,7 @@ class NavigationManager {
       return;
     }
 
-    // Check progress to next step
+    // Step progression
     if (currentStep.location) {
       const [stepLon, stepLat] = currentStep.location;
       const distToStepManeuver = calcDistance(
@@ -330,98 +341,46 @@ class NavigationManager {
         stepLon
       );
 
-      // Maneuver threshold: within 20m, advance to next step
-      if (distToStepManeuver < 20 && route.currentStepIndex < route.steps.length - 1) {
-        route.currentStepIndex += 1;
-        const nextStep = route.steps[route.currentStepIndex];
-        this.lastAnnouncedStepIndex = route.currentStepIndex;
-        speechManager.speak(nextStep.instruction, 3, true);
-        this.notify();
-        return;
+      if (distToStepManeuver <= 12) {
+        const nextIndex = route.currentStepIndex + 1;
+        if (nextIndex < route.steps.length) {
+          route.currentStepIndex = nextIndex;
+          const nextStep = route.steps[nextIndex];
+          audioManager.speak(nextStep.instruction, 3, false);
+          this.notify();
+        }
       }
-    }
-
-    // Off-route check every 15 seconds
-    const now = Date.now();
-    if (now - this.lastOffRouteCheck > 15000 && currentStep.location) {
-      this.lastOffRouteCheck = now;
-      const [stepLon, stepLat] = currentStep.location;
-      const distToStep = calcDistance(
-        this.currentCoords.latitude,
-        this.currentCoords.longitude,
-        stepLat,
-        stepLon
-      );
-
-      // If user is far from current step and moving further away
-      if (distToStep > 65) {
-        speechManager.speak('You are off route. Recalculating walking route.', 3, true);
-        this.recalculateRoute();
-      }
-    }
-  }
-
-  public async recalculateRoute() {
-    if (!this.currentRoute || !this.currentCoords) return;
-
-    const destLat = this.currentRoute.destinationCoords.lat;
-    const destLon = this.currentRoute.destinationCoords.lon;
-    const destName = this.currentRoute.destinationName;
-
-    try {
-      const url = `/api/navigation/route?startLat=${this.currentCoords.latitude}&startLon=${this.currentCoords.longitude}&endLat=${destLat}&endLon=${destLon}`;
-      const res = await fetch(url);
-      if (!res.ok) return;
-
-      const data = await res.json();
-      if (!data.steps || data.steps.length === 0) return;
-
-      this.currentRoute.steps = data.steps;
-      this.currentRoute.currentStepIndex = 0;
-      this.currentRoute.distanceMeters = data.distanceMeters;
-      this.currentRoute.durationSeconds = data.durationSeconds;
-      this.currentRoute.geometry = data.geometry;
-      this.lastAnnouncedStepIndex = 0;
-      this.notify();
-
-      speechManager.speak(
-        `New route calculated. ${data.steps[0].instruction}`,
-        3,
-        true
-      );
-    } catch (e) {
-      console.warn('Recalculate route failed:', e);
     }
   }
 
   public repeatInstruction() {
     if (!this.isNavigating || !this.currentRoute) {
-      speechManager.speak('Navigation is not currently active.', 4);
+      audioManager.speak('Navigation is not currently active.', 4, true);
       return;
     }
     const currentStep = this.currentRoute.steps[this.currentRoute.currentStepIndex];
     if (currentStep) {
-      speechManager.speak(currentStep.instruction, 3, true);
+      audioManager.speak(currentStep.instruction, 3, true);
     }
   }
 
   public announceNextTurn() {
     if (!this.isNavigating || !this.currentRoute) {
-      speechManager.speak('Navigation is not currently active.', 4);
+      audioManager.speak('Navigation is not currently active.', 4, true);
       return;
     }
     const nextIndex = this.currentRoute.currentStepIndex + 1;
     if (nextIndex < this.currentRoute.steps.length) {
       const nextStep = this.currentRoute.steps[nextIndex];
-      speechManager.speak(`The next turn is: ${nextStep.instruction}`, 3, true);
+      audioManager.speak(`The next turn is: ${nextStep.instruction}`, 3, true);
     } else {
-      speechManager.speak('You are approaching your final destination.', 3, true);
+      audioManager.speak('You are approaching your final destination.', 3, true);
     }
   }
 
   public announceDistanceRemaining() {
     if (!this.isNavigating || !this.currentRoute || !this.currentCoords) {
-      speechManager.speak('Navigation is not currently active.', 4);
+      audioManager.speak('Navigation is not currently active.', 4, true);
       return;
     }
     const distToDest = calcDistance(
@@ -430,8 +389,8 @@ class NavigationManager {
       this.currentRoute.destinationCoords.lat,
       this.currentRoute.destinationCoords.lon
     );
-    const mins = Math.max(1, Math.round(distToDest / 80)); // 80m/min avg walk speed
-    speechManager.speak(
+    const mins = Math.max(1, Math.round(distToDest / 80));
+    audioManager.speak(
       `Approximately ${distToDest} meters remaining to ${this.currentRoute.destinationName}. About ${mins} minutes walk.`,
       3,
       true
@@ -441,7 +400,7 @@ class NavigationManager {
   public pauseNavigation() {
     if (this.isNavigating) {
       this.isPaused = true;
-      speechManager.speak('Navigation paused.', 4);
+      audioManager.speak('Navigation paused.', 4, true);
       this.notify();
     }
   }
@@ -449,7 +408,7 @@ class NavigationManager {
   public resumeNavigation() {
     if (this.isNavigating) {
       this.isPaused = false;
-      speechManager.speak('Navigation resumed.', 4);
+      audioManager.speak('Navigation resumed.', 4, true);
       this.repeatInstruction();
       this.notify();
     }
@@ -461,21 +420,21 @@ class NavigationManager {
     this.currentRoute = null;
     this.searchCandidates = null;
     this.pendingDestination = null;
-    speechManager.speak('Navigation stopped.', 4);
+    this.pendingDestinationText = null;
+    this.waitingForConfirmation = false;
+    audioManager.speak('Navigation stopped.', 4, true);
     this.notify();
   }
 
-  // Opens external phone map app
   public openExternalMap() {
-    if (!this.currentRoute) return;
-    const dest = this.currentRoute.destinationCoords;
-    const origin = this.currentCoords
-      ? `${this.currentCoords.latitude},${this.currentCoords.longitude}`
-      : '';
-    const destStr = `${dest.lat},${dest.lon}`;
-
-    const url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destStr}&travelmode=walking`;
-    window.open(url, '_blank');
+    if (this.currentRoute) {
+      this.openGoogleMapsNavigation(
+        this.currentRoute.destinationName,
+        this.currentRoute.destinationCoords
+      );
+    } else if (this.pendingDestinationText) {
+      this.openGoogleMapsNavigation(this.pendingDestinationText);
+    }
   }
 
   public isNavActive(): boolean {
